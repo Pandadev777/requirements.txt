@@ -158,7 +158,6 @@ async def auto_vouch_user_loop(channel: discord.TextChannel, voucher_role: disco
             delay = random.randint(180, 300) # 2-5 Minutes Delay
             await asyncio.sleep(delay)
 
-            # Ensure latest member data is populated
             vouchers = [m for m in voucher_role.members if not m.bot]
             recipients = [m for m in recipient_role.members if not m.bot]
 
@@ -168,7 +167,6 @@ async def auto_vouch_user_loop(channel: discord.TextChannel, voucher_role: disco
             voucher = random.choice(vouchers)
             recipient = random.choice(recipients)
             
-            # Prevent self-vouching in auto system
             if voucher.id == recipient.id and len(vouchers) > 1:
                 vouchers_filtered = [v for v in vouchers if v.id != recipient.id]
                 voucher = random.choice(vouchers_filtered)
@@ -240,7 +238,7 @@ async def vouch(interaction: discord.Interaction, user: discord.Member, rating: 
 @app_commands.describe(
     voucher_role="Role of members providing vouches",
     recipient_role="Role of members receiving vouches",
-    comments_csv="Comma separated list of comments (up to 30)"
+    comments_csv="Comma separated list of comments (up to 100)"
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def autovouch_start(interaction: discord.Interaction, voucher_role: discord.Role, recipient_role: discord.Role, comments_csv: str):
@@ -249,7 +247,8 @@ async def autovouch_start(interaction: discord.Interaction, voucher_role: discor
         await interaction.response.send_message("⚠️ User Auto-Vouch is already active! Stop it with `/autovouch_stop` first.", ephemeral=True)
         return
 
-    comments = [c.strip() for c in comments_csv.split(",") if c.strip()][:30]
+    # Slice updated to allow up to 100 comments
+    comments = [c.strip() for c in comments_csv.split(",") if c.strip()][:100]
     if not comments:
         await interaction.response.send_message("❌ Please supply valid comments.", ephemeral=True)
         return
@@ -281,7 +280,7 @@ async def autovouch_stop(interaction: discord.Interaction):
 
 # 4. /server_vouch_start
 @bot.tree.command(name="server_vouch_start", description="Start server auto-vouching every 2-5 minutes.")
-@app_commands.describe(voucher_role="Role of members vouching for the server", comments_csv="Comma separated comments")
+@app_commands.describe(voucher_role="Role of members vouching for the server", comments_csv="Comma separated comments (up to 100)")
 @app_commands.checks.has_permissions(administrator=True)
 async def server_vouch_start(interaction: discord.Interaction, voucher_role: discord.Role, comments_csv: str):
     guild_id = interaction.guild.id
@@ -289,7 +288,8 @@ async def server_vouch_start(interaction: discord.Interaction, voucher_role: dis
         await interaction.response.send_message("⚠️ Server Auto-Vouch is already active! Stop it with `/server_vouch_stop` first.", ephemeral=True)
         return
 
-    comments = [c.strip() for c in comments_csv.split(",") if c.strip()][:30]
+    # Slice updated to allow up to 100 comments
+    comments = [c.strip() for c in comments_csv.split(",") if c.strip()][:100]
     if not comments:
         await interaction.response.send_message("❌ Please supply valid comments.", ephemeral=True)
         return
