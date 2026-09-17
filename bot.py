@@ -11,7 +11,7 @@ from discord.ext import commands
 from flask import Flask
 
 # ------------------------------------------------------------------------------
-# 1. FLASK WEB SERVER (For Render Web Service Hosting)
+# 1. FLASK WEB SERVER (For Render Hosting Keep-Alive)
 # ------------------------------------------------------------------------------
 app = Flask(__name__)
 
@@ -48,8 +48,7 @@ def init_db():
 def generate_vouch_id():
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
-# Global state to track background auto-vouch tasks per guild
-# Format: {"user_autovouch": {guild_id: Task}, "server_autovouch": {guild_id: Task}}
+# Active background loop storage
 active_tasks = {
     "user_autovouch": {},
     "server_autovouch": {}
@@ -72,8 +71,20 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
     print(f"Logged in as {bot.user.name}")
 
-# Embed Generator
-def build_vouch_embed(guild: discord.Guild, voucher: discord.Member, target: discord.Member | None, rating: int, comment: str, vouch_id: str, is_server: bool = False) -> discord.Embed:
+# Helper: Fetch User cleanly (Prevents ID leak if uncached)
+async def resolve_user(user_id: int) -> discord.User | str:
+    if user_id == 0:
+        return "Server"
+    try:
+        user = bot.get_user(user_id)
+        if not user:
+            user = await bot.fetch_user(user_id)
+        return user
+    except Exception:
+        return "Unknown User"
+
+# Helper: Build Vouch Embed using Usernames and Profiles
+def build_vouch_embed(guild: discord.Guild, voucher: discord.User | discord.Member, target: discord.User | discord.Member | None, rating: int, comment: str, vouch_id: str, is_server: bool = False) -> discord.Embed:
     stars = "⭐" * rating
     embed = discord.Embed(
         title="✨ New Verified Vouch ✨",
@@ -81,15 +92,19 @@ def build_vouch_embed(guild: discord.Guild, voucher: discord.Member, target: dis
         timestamp=datetime.utcnow()
     )
     
-    embed.add_field(name="👤 Voucher", value=voucher.mention, inline=True)
+    # Voucher details
+    voucher_name = getattr(voucher, "display_name", str(voucher))
+    embed.add_field(name="👤 Voucher", value=f"**{voucher_name}** ({voucher.mention})", inline=True)
     
+    # Target / Recipient details
     if is_server:
         embed.add_field(name="🏢 Recipient", value=f"**{guild.name}**", inline=True)
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
     else:
-        embed.add_field(name="🎯 Recipient", value=target.mention if target else "Unknown Member", inline=True)
-        if target and target.display_avatar:
+        target_name = getattr(target, "display_name", str(target))
+        embed.add_field(name="🎯 Recipient", value=f"**{target_name}** ({target.mention})", inline=True)
+        if target and hasattr(target, "display_avatar"):
             embed.set_thumbnail(url=target.display_avatar.url)
             
     embed.add_field(name="⭐ Rating", value=f"{stars} (`{rating}/5`)", inline=False)
@@ -112,13 +127,13 @@ def save_vouch_to_db(vouch_id: str, guild_id: int, voucher_id: int, target_id: i
     conn.close()
 
 # ------------------------------------------------------------------------------
-# 4. BACKGROUND TASK LOOPS (Auto Vouching System)
+# 4. BACKGROUND LOOPS (2-5 MIN DELAY AUTO VOUCHING)
 # ------------------------------------------------------------------------------
 async def auto_vouch_user_loop(channel: discord.TextChannel, voucher_role: discord.Role, recipient_role: discord.Role, comments: list):
     guild = channel.guild
     while True:
         try:
-            # 2 to 5 minutes delay (180 to 300 seconds)
+            # Random delay: 2 to 5 minutes (180 to 300 seconds)
             delay = random.randint(180, 300)
             await asyncio.sleep(delay)
 
@@ -203,7 +218,7 @@ async def vouch(interaction: discord.Interaction, user: discord.Member, rating: 
 async def autovouch_start(interaction: discord.Interaction, voucher_role: discord.Role, recipient_role: discord.Role, comments_csv: str):
     guild_id = interaction.guild.id
     if guild_id in active_tasks["user_autovouch"]:
-        await interaction.response.send_message("⚠️ User Auto-Vouch is already running in this server! Stop it first with `/autovouch_stop`.", ephemeral=True)
+        await interaction.response.send_message("⚠️ User Auto-Vouch is already running! Stop it first with `/autovouch_stop`.", ephemeral=True)
         return
 
     comments = [c.strip() for c in comments_csv.split(",") if c.strip()][:30]
@@ -218,7 +233,7 @@ async def autovouch_start(interaction: discord.Interaction, voucher_role: discor
 
     embed = discord.Embed(
         title="🚀 User Auto-Vouch Started",
-        description=f"Auto-vouching active in {interaction.channel.mention}.\n**Delay:** Randomly every 2–5 minutes.\n**Voucher Role:** {voucher_role.mention}\n**Recipient Role:** {recipient_role.mention}",
+        description=f"Auto-vouching active in {interaction.channel.mention}.\n**Interval:** Randomly every 2–5 minutes.\n**Voucher Role:** {voucher_role.mention}\n**Recipient Role:** {recipient_role.mention}",
         color=discord.Color.green()
     )
     await interaction.response.send_message(embed=embed)
@@ -258,7 +273,7 @@ async def server_vouch_start(interaction: discord.Interaction, voucher_role: dis
 
     embed = discord.Embed(
         title="🚀 Server Auto-Vouch Started",
-        description=f"Server Auto-vouching active in {interaction.channel.mention}.\n**Delay:** Randomly every 2–5 minutes.\n**Voucher Role:** {voucher_role.mention}",
+        description=f"Server Auto-vouching active in {interaction.channel.mention}.\n**Interval:** Randomly every 2–5 minutes.\n**Voucher Role:** {voucher_role.mention}",
         color=discord.Color.green()
     )
     await interaction.response.send_message(embed=embed)
@@ -297,7 +312,7 @@ async def set_vouch(interaction: discord.Interaction, user: discord.Member, coun
     conn.commit()
     conn.close()
 
-    await interaction.response.send_message(f"✅ Set {user.mention}'s total vouches to **{count}**.")
+    await interaction.response.send_message(f"✅ Set **{user.display_name}** ({user.mention}) total vouches to **{count}**.")
 
 # 7. /remove_vouch
 @bot.tree.command(name="remove_vouch", description="Remove a specific vouch using its Vouch ID (Admin).")
@@ -336,7 +351,7 @@ async def vouches(interaction: discord.Interaction, user: discord.Member = None)
     if user:
         embed.set_author(name=f"{user.display_name}'s Stats", icon_url=user.display_avatar.url)
         embed.set_thumbnail(url=user.display_avatar.url)
-        embed.add_field(name="User", value=user.mention, inline=True)
+        embed.add_field(name="User", value=f"**{user.display_name}** ({user.mention})", inline=True)
     else:
         embed.set_author(name=f"{interaction.guild.name}'s Stats", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
         if interaction.guild.icon:
@@ -347,9 +362,11 @@ async def vouches(interaction: discord.Interaction, user: discord.Member = None)
     embed.add_field(name="Average Rating", value=f"⭐ **{avg_rating}/5.0**", inline=True)
     await interaction.response.send_message(embed=embed)
 
-# 9. /vouch_leaderboard
+# 9. /vouch_leaderboard (Fully Resolved Usernames)
 @bot.tree.command(name="vouch_leaderboard", description="Displays the top vouch leaderboard.")
 async def vouch_leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer()
+
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -364,14 +381,21 @@ async def vouch_leaderboard(interaction: discord.Interaction):
     conn.close()
 
     if not results:
-        await interaction.response.send_message("🏆 No vouches recorded yet in this server!")
+        await interaction.followup.send("🏆 No vouches recorded yet in this server!")
         return
 
     description = ""
     medals = ["🥇", "🥈", "🥉"]
     for idx, (target_id, count, avg_r) in enumerate(results, start=1):
         prefix = medals[idx-1] if idx <= 3 else f"`#{idx}`"
-        description += f"{prefix} <@{target_id}> • **{count}** vouches (Avg: ⭐ {avg_r:.1f})\n"
+        resolved_user = await resolve_user(target_id)
+        
+        if isinstance(resolved_user, discord.User) or isinstance(resolved_user, discord.Member):
+            user_str = f"**{resolved_user.display_name}** ({resolved_user.mention})"
+        else:
+            user_str = f"User (`ID: {target_id}`)"
+            
+        description += f"{prefix} {user_str} • **{count}** vouches (⭐ {avg_r:.1f})\n"
 
     embed = discord.Embed(
         title="🏆 Server Vouch Leaderboard",
@@ -380,7 +404,7 @@ async def vouch_leaderboard(interaction: discord.Interaction):
         timestamp=datetime.utcnow()
     )
     embed.set_footer(text=f"Server: {interaction.guild.name}")
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 # ------------------------------------------------------------------------------
 # 6. INITIALIZATION
