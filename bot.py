@@ -17,7 +17,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "⚡ Advanced MM Vouch Bot - Active and Operational"
+    return "⚡ MM Vouch Bot - Active and Operational"
 
 def run_flask():
     port = int(os.getenv("PORT", 8080))
@@ -181,7 +181,7 @@ async def auto_vouch_user_loop(
     guild = channel.guild
     while True:
         try:
-            # Custom randomized time gap in seconds
+            # Custom randomized time gap in seconds (Default 300 to 420s)
             delay = random.randint(min_delay_sec, max_delay_sec)
             await asyncio.sleep(delay)
 
@@ -257,13 +257,13 @@ async def auto_vouch_server_loop(
 # 5. SLASH COMMANDS
 # ------------------------------------------------------------------------------
 
-# 1. /vouch
-@bot.tree.command(name="vouch", description="Submit an official vouch for a user.")
+# 1. /setvouch
+@bot.tree.command(name="setvouch", description="Submit an official vouch for a user.")
 @app_commands.describe(
     user="The member to vouch for", 
     enable_ranks="Show Middleman Rank in vouch embed?"
 )
-async def vouch(
+async def setvouch(
     interaction: discord.Interaction, 
     user: discord.Member, 
     enable_ranks: bool = True
@@ -284,7 +284,76 @@ async def vouch(
     )
     await interaction.response.send_message(content=message_content, embed=embed)
 
-# 2. /autovouch_start
+# 2. /vouches
+@bot.tree.command(name="vouches", description="Check vouches for a user or the server.")
+@app_commands.describe(user="User profile to check (Leave empty for server profile)", show_rank="Show MM Rank on profile?")
+async def vouches(interaction: discord.Interaction, user: discord.Member = None, show_rank: bool = True):
+    target_id = user.id if user else 0
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM vouches WHERE target_id = ? AND guild_id = ?", (target_id, interaction.guild.id))
+    total_vouches = cursor.fetchone()[0]
+    conn.close()
+
+    embed = discord.Embed(title="📊 TRUST & REPUTATION PROFILE", color=0x5865F2)
+    if user:
+        embed.set_author(name=f"{user.display_name} (@{user.name})", icon_url=user.display_avatar.url)
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="User", value=f"{user.mention}\n`@{user.name}`", inline=True)
+        
+        if show_rank:
+            embed.add_field(name="🏆 Middleman Rank", value=f"`{get_mm_rank(total_vouches)}`", inline=True)
+    else:
+        embed.set_author(name=f"{interaction.guild.name}", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+        if interaction.guild.icon:
+            embed.set_thumbnail(url=interaction.guild.icon.url)
+        embed.add_field(name="Target", value="🏢 Server Profile", inline=True)
+
+    embed.add_field(name="Total Vouches", value=f"**{total_vouches}** Verified", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+# 3. /vouches_leaderboard
+@bot.tree.command(name="vouches_leaderboard", description="Display top users with the highest vouches.")
+async def vouches_leaderboard(interaction: discord.Interaction):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT target_id, COUNT(*) as vouch_count 
+        FROM vouches 
+        WHERE guild_id = ? AND target_id != 0 
+        GROUP BY target_id 
+        ORDER BY vouch_count DESC 
+        LIMIT 10
+    """, (interaction.guild.id,))
+    top_users = cursor.fetchall()
+    conn.close()
+
+    if not top_users:
+        await interaction.response.send_message("❌ No user vouches recorded in this server yet.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=f"🏆 VOUCH LEADERBOARD - {interaction.guild.name}",
+        color=0xFEE75C,
+        timestamp=datetime.utcnow()
+    )
+
+    leaderboard_text = ""
+    medals = ["🥇", "🥈", "🥉"]
+
+    for idx, (target_id, count) in enumerate(top_users, start=1):
+        member = interaction.guild.get_member(target_id)
+        name = f"{member.mention}" if member else f"<@{target_id}>"
+        rank_badge = medals[idx - 1] if idx <= 3 else f"`#{idx}`"
+        mm_rank = get_mm_rank(count)
+        
+        leaderboard_text += f"{rank_badge} {name} • **{count}** Vouches (`{mm_rank}`)\n"
+
+    embed.description = leaderboard_text
+    embed.set_footer(text=f"Requested by {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+# 4. /autovouch_start
 @bot.tree.command(name="autovouch_start", description="Start user auto-vouching loop with custom time gaps.")
 @app_commands.describe(
     voucher_role="Role providing vouches",
@@ -333,7 +402,7 @@ async def autovouch_start(
     )
     await interaction.response.send_message(embed=embed)
 
-# 3. /autovouch_stop
+# 5. /autovouch_stop
 @bot.tree.command(name="autovouch_stop", description="Stop active user auto-vouching loop.")
 @app_commands.checks.has_permissions(administrator=True)
 async def autovouch_stop(interaction: discord.Interaction):
@@ -346,7 +415,7 @@ async def autovouch_stop(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ No active User Auto-Vouch loop found.", ephemeral=True)
 
-# 4. /server_vouch_start
+# 6. /server_vouch_start
 @bot.tree.command(name="server_vouch_start", description="Start server auto-vouching loop with custom time gaps.")
 @app_commands.describe(
     voucher_role="Role vouching for server", 
@@ -389,7 +458,7 @@ async def server_vouch_start(
     )
     await interaction.response.send_message(embed=embed)
 
-# 5. /server_vouch_stop
+# 7. /server_vouch_stop
 @bot.tree.command(name="server_vouch_stop", description="Stop active server auto-vouching loop.")
 @app_commands.checks.has_permissions(administrator=True)
 async def server_vouch_stop(interaction: discord.Interaction):
@@ -401,34 +470,6 @@ async def server_vouch_stop(interaction: discord.Interaction):
         await interaction.response.send_message("🛑 **Server Auto-Vouch** loop stopped successfully.")
     else:
         await interaction.response.send_message("❌ No active Server Auto-Vouch loop found.", ephemeral=True)
-
-# 6. /vouches
-@bot.tree.command(name="vouches", description="Check vouches for a user or the server.")
-@app_commands.describe(user="User profile to check", show_rank="Show MM Rank on profile?")
-async def vouches(interaction: discord.Interaction, user: discord.Member = None, show_rank: bool = True):
-    target_id = user.id if user else 0
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM vouches WHERE target_id = ? AND guild_id = ?", (target_id, interaction.guild.id))
-    total_vouches = cursor.fetchone()[0]
-    conn.close()
-
-    embed = discord.Embed(title="📊 TRUST & REPUTATION PROFILE", color=0x5865F2)
-    if user:
-        embed.set_author(name=f"{user.display_name} (@{user.name})", icon_url=user.display_avatar.url)
-        embed.set_thumbnail(url=user.display_avatar.url)
-        embed.add_field(name="User", value=f"{user.mention}\n`@{user.name}`", inline=True)
-        
-        if show_rank:
-            embed.add_field(name="🏆 Middleman Rank", value=f"`{get_mm_rank(total_vouches)}`", inline=True)
-    else:
-        embed.set_author(name=f"{interaction.guild.name}", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
-        if interaction.guild.icon:
-            embed.set_thumbnail(url=interaction.guild.icon.url)
-        embed.add_field(name="Target", value="🏢 Server Profile", inline=True)
-
-    embed.add_field(name="Total Vouches", value=f"**{total_vouches}** Verified", inline=True)
-    await interaction.response.send_message(embed=embed)
 
 # ------------------------------------------------------------------------------
 # 6. INITIALIZATION
