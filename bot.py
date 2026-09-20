@@ -10,6 +10,12 @@ from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
+# ==============================================================================
+# ⚠️ IMPORTANT CONFIGURATION
+# Set your server ID here for INSTANT command updates (bypasses 1-hour global cache)
+# ==============================================================================
+GUILD_ID = 1528075642133024932  # 👈 REPLACE THIS WITH YOUR DISCORD SERVER ID (INTEGER)
+
 # ------------------------------------------------------------------------------
 # 1. FLASK KEEP-ALIVE SERVER (FOR RENDER / KOYEB)
 # ------------------------------------------------------------------------------
@@ -169,12 +175,27 @@ async def on_ready():
             await guild.chunk()
         except Exception as e:
             print(f"Failed to chunk guild {guild.name}: {e}")
-            
+
+    # --------------------------------------------------------------------------
+    # FORCE SYNC & MISMATCH CLEARING ROUTINE
+    # --------------------------------------------------------------------------
     try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash command(s).")
+        guild_obj = discord.Object(id=GUILD_ID)
+
+        # 1. Clear any mismatched commands attached directly to the guild
+        bot.tree.clear_commands(guild=guild_obj)
+        await bot.tree.sync(guild=guild_obj)
+
+        # 2. Copy current global command signatures to guild tree
+        bot.tree.copy_global_to(guild=guild_obj)
+        
+        # 3. Force re-sync immediately
+        synced = await bot.tree.sync(guild=guild_obj)
+        print(f"⚡ INSTANT SYNC SUCCESSFUL: Registered {len(synced)} fresh command(s) to Guild ID {GUILD_ID}.")
+
     except Exception as e:
-        print(f"Failed to sync commands: {e}")
+        print(f"❌ Command Sync Exception: {e}")
+
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
 
 def build_vouch_embed(
@@ -439,76 +460,80 @@ async def removevouch(interaction: discord.Interaction, count: int, user: discor
     
     set_vouch_count(interaction.guild.id, target_id, new_count)
     target_name = user.mention if user else f"**{interaction.guild.name}**"
-    await interaction.response.send_message(f"🗑️ Deducted `{count}` vouches. {target_name} is now at **{new_count}** vouches.")
+    await interaction.response.send_message(f"🗑️ Subtracted **{count}** vouches from {target_name}. New Total: **{new_count}**.")
 
-# 6. /vouches
-@bot.tree.command(name="vouches", description="Check total vouches and MM rank for a user or server.")
-@app_commands.describe(user="User profile to check (Leave empty for server profile)")
-async def vouches(interaction: discord.Interaction, user: discord.Member = None):
+# 6. /profile
+@bot.tree.command(name="profile", description="Check middleman or server vouch metrics.")
+@app_commands.describe(user="User profile (Leave empty for server profile)")
+async def profile(interaction: discord.Interaction, user: discord.Member = None):
+    guild = interaction.guild
     target_id = user.id if user else 0
-    total_vouches = get_vouch_count(interaction.guild.id, target_id)
+    total = get_vouch_count(guild.id, target_id)
 
-    embed = discord.Embed(title="📊 VOUCH PROFILE", color=0x5865F2)
+    embed = discord.Embed(color=0x2B2D31)
+
     if user:
-        embed.add_field(name="Middleman", value=user.mention, inline=True)
-        embed.add_field(name="MM Rank", value=get_mm_rank(total_vouches), inline=True)
+        embed.title = f"👤 Middleman Profile: {user.display_name}"
+        embed.add_field(name="🎯 Middleman", value=user.mention, inline=True)
+        embed.add_field(name="📈 Total Deals Vouched", value=f"**{total}**", inline=True)
+        embed.add_field(name="🎖️ MM Rank", value=get_mm_rank(total), inline=False)
         if user.display_avatar:
             embed.set_thumbnail(url=user.display_avatar.url)
     else:
-        embed.add_field(name="Target", value=f"🏢 **{interaction.guild.name}**", inline=True)
-        if interaction.guild.icon:
-            embed.set_thumbnail(url=interaction.guild.icon.url)
+        embed.title = f"🏢 Server Profile: {guild.name}"
+        embed.add_field(name="🏢 Server", value=guild.name, inline=True)
+        embed.add_field(name="📈 Total Server Vouches", value=f"**{total}**", inline=True)
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
 
-    embed.add_field(name="Total Vouches", value=f"**{total_vouches}**", inline=False)
-    
-    footer_icon = interaction.guild.icon.url if interaction.guild.icon else None
-    embed.set_footer(text=interaction.guild.name, icon_url=footer_icon)
-    
+    embed.set_footer(text=f"Server: {guild.name}")
     await interaction.response.send_message(embed=embed)
 
-# 7. /vouch_leaderboard
-@bot.tree.command(name="vouch_leaderboard", description="Display top middlemen in the server.")
-async def vouch_leaderboard(interaction: discord.Interaction):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT target_id, count 
-        FROM vouch_counts 
-        WHERE guild_id = ? AND target_id != 0 AND count > 0
-        ORDER BY count DESC 
-        LIMIT 10
-    """, (interaction.guild.id,))
-    top_users = cursor.fetchall()
-    conn.close()
+# 7. /stop_autovouch
+@bot.tree.command(name="stop_autovouch", description="Stop user or server auto-vouching loops.")
+@app_commands.describe(type="Select which loop to terminate")
+@app_commands.choices(type=[
+    app_commands.Choice(name="User Auto-Vouch", value="user"),
+    app_commands.Choice(name="Server Auto-Vouch", value="server"),
+])
+@app_commands.checks.has_permissions(administrator=True)
+async def stop_autovouch(interaction: discord.Interaction, type: str):
+    guild_id = interaction.guild.id
+    target_dict = active_tasks["user_autovouch"] if type == "user" else active_tasks["server_autovouch"]
 
-    if not top_users:
-        await interaction.response.send_message("❌ No middleman vouches recorded in this server yet.", ephemeral=True)
-        return
+    if guild_id in target_dict:
+        target_dict[guild_id].cancel()
+        del target_dict[guild_id]
+        await interaction.response.send_message(f"🛑 Terminated {type} auto-vouch service.")
+    else:
+        await interaction.response.send_message(f"⚠️ No active {type} auto-vouch process running.", ephemeral=True)
 
-    embed = discord.Embed(title=f"🏆 MIDDLEMAN LEADERBOARD", color=0xFEE75C)
-    leaderboard_text = ""
-    medals = ["🥇", "🥈", "🥉"]
-
-    for idx, (target_id, count) in enumerate(top_users, start=1):
-        member = interaction.guild.get_member(target_id)
-        name = f"{member.mention}" if member else f"<@{target_id}>"
-        rank_badge = medals[idx - 1] if idx <= 3 else f"`#{idx}`"
-        
-        leaderboard_text += f"{rank_badge} {name} • **{count}** Vouches ({get_mm_rank(count)})\n"
-
-    embed.description = leaderboard_text
-    footer_icon = interaction.guild.icon.url if interaction.guild.icon else None
-    embed.set_footer(text=interaction.guild.name, icon_url=footer_icon)
-
-    await interaction.response.send_message(embed=embed)
+# 8. Prefix Admin Sync (!sync)
+@bot.command(name="sync")
+@commands.has_permissions(administrator=True)
+async def sync_prefix(ctx: commands.Context):
+    """Fallback manual sync if Discord cache hangs."""
+    try:
+        guild_obj = discord.Object(id=GUILD_ID)
+        bot.tree.clear_commands(guild=guild_obj)
+        bot.tree.copy_global_to(guild=guild_obj)
+        synced = await bot.tree.sync(guild=guild_obj)
+        await ctx.send(f"✅ Forced Manual Sync Complete! Re-registered **{len(synced)}** command(s).")
+    except Exception as e:
+        await ctx.send(f"❌ Manual Sync Failed: `{e}`")
 
 # ------------------------------------------------------------------------------
-# 6. INITIALIZATION & EXECUTION
+# 6. RUN PROCESS
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
+    # Start Keep-Alive Server in a daemon thread
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
 
-    TOKEN = os.getenv("DISCORD_TOKEN")
-    if not TOKEN:
-        raise ValueError("DISCORD_TOKEN environment variable is missing.")
-    bot.run(TOKEN)
+    # Launch Discord Bot
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        print("❌ CRITICAL ERROR: 'DISCORD_TOKEN' environment variable is missing!")
+    else:
+        bot.run(token)
