@@ -130,7 +130,7 @@ def get_mm_rank(vouch_count: int) -> str:
         return "⚪ **Unranked MM**"
 
 def render_stars(rating: int) -> str:
-    return "⭐" * rating + "🔌" * (5 - rating)
+    return "⭐" * rating + "⚪" * (5 - rating)
 
 # Default comment library for server auto-vouch
 DEFAULT_SERVER_COMMENTS = [
