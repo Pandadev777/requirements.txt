@@ -4,6 +4,7 @@ import random
 import sqlite3
 import string
 import threading
+import time
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -66,6 +67,16 @@ def get_mm_rank(vouch_count: int) -> str:
     else:
         return "🥉 **Novice Middleman**"
 
+def save_vouch_to_db(vouch_id: str, guild_id: int, voucher_id: int, target_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO vouches (vouch_id, guild_id, voucher_id, target_id) VALUES (?, ?, ?, ?)",
+        (vouch_id, guild_id, voucher_id, target_id)
+    )
+    conn.commit()
+    conn.close()
+
 active_tasks = {
     "user_autovouch": {},
     "server_autovouch": {}
@@ -106,8 +117,10 @@ def build_mm_vouch_embed(
     total_vouches: int,
     is_server: bool = False
 ) -> discord.Embed:
+    current_time_unix = int(time.time())
+
     embed = discord.Embed(
-        title="✅ VOUCH VERIFIED",
+        title="✅ VERIFIED VOUCH",
         color=0x2B2D31
     )
 
@@ -115,24 +128,30 @@ def build_mm_vouch_embed(
 
     if is_server:
         embed.add_field(name="🏢 Recipient", value=f"**{guild.name}**", inline=True)
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
     else:
         mm_rank = get_mm_rank(total_vouches)
         embed.add_field(name="🎯 Middleman", value=target.mention, inline=True)
         embed.add_field(name="🎖️ MM Rank", value=mm_rank, inline=True)
+        # Set recipient profile picture on the right side of the embed
+        if target.display_avatar:
+            embed.set_thumbnail(url=target.display_avatar.url)
 
     embed.add_field(name="📈 Total Deals Vouched", value=f"**{total_vouches}**", inline=False)
-    embed.set_footer(text=f"Vouch ID: {vouch_id}")
-    return embed
-
-def save_vouch_to_db(vouch_id: str, guild_id: int, voucher_id: int, target_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO vouches (vouch_id, guild_id, voucher_id, target_id) VALUES (?, ?, ?, ?)",
-        (vouch_id, guild_id, voucher_id, target_id)
+    
+    # Display the exact vouch time right below the vouch details
+    embed.add_field(
+        name="⏰ Time of Vouch", 
+        value=f"<t:{current_time_unix}:F> (<t:{current_time_unix}:R>)", 
+        inline=False
     )
-    conn.commit()
-    conn.close()
+
+    # Server icon and name in footer
+    footer_icon = guild.icon.url if guild.icon else None
+    embed.set_footer(text=f"{guild.name} • Vouch ID: {vouch_id}", icon_url=footer_icon)
+
+    return embed
 
 # ------------------------------------------------------------------------------
 # 4. BACKGROUND AUTO-VOUCH LOOPS
@@ -168,7 +187,7 @@ async def auto_vouch_user_loop(
             save_vouch_to_db(v_id, guild.id, voucher.id, recipient.id)
             total_vouches = get_vouch_count(guild.id, recipient.id)
 
-            message_content = f"🎉 {recipient.mention} received a MM vouch! Now at **({total_vouches})** vouches."
+            message_content = f"✅ 🎉 {recipient.mention} received a MM vouch! Now at **({total_vouches})** vouches."
             
             embed = build_mm_vouch_embed(
                 guild, voucher, recipient, v_id, 
@@ -203,7 +222,7 @@ async def auto_vouch_server_loop(
             save_vouch_to_db(v_id, guild.id, voucher.id, 0)
             total_vouches = get_vouch_count(guild.id, 0)
 
-            message_content = f"🎉 **{guild.name}** received a vouch! Now at **({total_vouches})** vouches."
+            message_content = f"✅ 🎉 **{guild.name}** received a vouch! Now at **({total_vouches})** vouches."
 
             embed = build_mm_vouch_embed(
                 guild, voucher, None, v_id, 
@@ -252,10 +271,18 @@ async def vouches(interaction: discord.Interaction, user: discord.Member = None)
         mm_rank = get_mm_rank(total_vouches)
         embed.add_field(name="Middleman", value=user.mention, inline=True)
         embed.add_field(name="MM Rank", value=mm_rank, inline=True)
+        if user.display_avatar:
+            embed.set_thumbnail(url=user.display_avatar.url)
     else:
         embed.add_field(name="Target", value="🏢 Server Profile", inline=True)
+        if interaction.guild.icon:
+            embed.set_thumbnail(url=interaction.guild.icon.url)
 
     embed.add_field(name="Total Vouches", value=f"**{total_vouches}**", inline=False)
+    
+    footer_icon = interaction.guild.icon.url if interaction.guild.icon else None
+    embed.set_footer(text=interaction.guild.name, icon_url=footer_icon)
+    
     await interaction.response.send_message(embed=embed)
 
 # 3. /vouches_leaderboard
@@ -279,7 +306,7 @@ async def vouches_leaderboard(interaction: discord.Interaction):
         return
 
     embed = discord.Embed(
-        title=f"🏆 MIDDLEMAN LEADERBOARD - {interaction.guild.name}",
+        title=f"🏆 MIDDLEMAN LEADERBOARD",
         color=0xFEE75C
     )
 
@@ -294,6 +321,9 @@ async def vouches_leaderboard(interaction: discord.Interaction):
         leaderboard_text += f"{rank_badge} {name} • **{count}** Vouches ({get_mm_rank(count)})\n"
 
     embed.description = leaderboard_text
+    footer_icon = interaction.guild.icon.url if interaction.guild.icon else None
+    embed.set_footer(text=interaction.guild.name, icon_url=footer_icon)
+
     await interaction.response.send_message(embed=embed)
 
 # 4. /autovouch_start
@@ -339,6 +369,9 @@ async def autovouch_start(
         ),
         color=0x57F287
     )
+    footer_icon = interaction.guild.icon.url if interaction.guild.icon else None
+    embed.set_footer(text=interaction.guild.name, icon_url=footer_icon)
+
     await interaction.response.send_message(embed=embed)
 
 # 5. /autovouch_stop
@@ -386,6 +419,9 @@ async def server_vouch_start(
         description=f"Running in {interaction.channel.mention} with {voucher_role.mention}.",
         color=0x57F287
     )
+    footer_icon = interaction.guild.icon.url if interaction.guild.icon else None
+    embed.set_footer(text=interaction.guild.name, icon_url=footer_icon)
+
     await interaction.response.send_message(embed=embed)
 
 # 7. /server_vouch_stop
