@@ -1,539 +1,239 @@
-import asyncio
-import os
-import random
-import sqlite3
-import string
-import threading
-import time
 import discord
-from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
+import json, os, random
+from datetime import datetime
 from flask import Flask
+from threading import Thread
 
-# ==============================================================================
-# ⚠️ IMPORTANT CONFIGURATION
-# Set your server ID here for INSTANT command updates (bypasses 1-hour global cache)
-# ==============================================================================
-GUILD_ID = 1528075642133024932  # 👈 REPLACE THIS WITH YOUR DISCORD SERVER ID (INTEGER)
+# --- Render Keep Alive ---
+app = Flask('')
+@app.route('/')
+def home(): return "Advanced MM Vouch Bot Running!"
+Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))).start()
 
-# ------------------------------------------------------------------------------
-# 1. FLASK KEEP-ALIVE SERVER (FOR RENDER / KOYEB)
-# ------------------------------------------------------------------------------
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "⚡ Middleman Vouch Bot - Online and Ready"
-
-def run_flask():
-    port = int(os.getenv("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-# ------------------------------------------------------------------------------
-# 2. DATABASE ARCHITECTURE & HELPER FUNCTIONS
-# ------------------------------------------------------------------------------
-DB_NAME = "vouches.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    # Table for individual vouch logs
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS vouches (
-            vouch_id TEXT PRIMARY KEY,
-            guild_id INTEGER,
-            voucher_id INTEGER,
-            target_id INTEGER, -- 0 represents Server Vouch
-            rating INTEGER,
-            comment TEXT,
-            timestamp INTEGER
-        )
-    """)
-    
-    # Table for manual total vouches overrides/tracking
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS vouch_counts (
-            guild_id INTEGER,
-            target_id INTEGER,
-            count INTEGER,
-            PRIMARY KEY (guild_id, target_id)
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def generate_vouch_id() -> str:
-    return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
-
-def get_vouch_count(guild_id: int, target_id: int) -> int:
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT count FROM vouch_counts WHERE guild_id = ? AND target_id = ?", (guild_id, target_id))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-def add_vouch(guild_id: int, voucher_id: int, target_id: int, rating: int, comment: str = None) -> tuple[str, int]:
-    v_id = generate_vouch_id()
-    now = int(time.time())
-    
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    # Insert vouch record
-    cursor.execute(
-        "INSERT INTO vouches (vouch_id, guild_id, voucher_id, target_id, rating, comment, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (v_id, guild_id, voucher_id, target_id, rating, comment, now)
-    )
-    
-    # Update total count
-    cursor.execute("""
-        INSERT INTO vouch_counts (guild_id, target_id, count)
-        VALUES (?, ?, 1)
-        ON CONFLICT(guild_id, target_id) DO UPDATE SET count = count + 1
-    """, (guild_id, target_id))
-    
-    conn.commit()
-    
-    # Fetch updated count
-    cursor.execute("SELECT count FROM vouch_counts WHERE guild_id = ? AND target_id = ?", (guild_id, target_id))
-    total_count = cursor.fetchone()[0]
-    
-    conn.close()
-    return v_id, total_count
-
-def set_vouch_count(guild_id: int, target_id: int, count: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO vouch_counts (guild_id, target_id, count)
-        VALUES (?, ?, ?)
-        ON CONFLICT(guild_id, target_id) DO UPDATE SET count = ?
-    """, (guild_id, target_id, count, count))
-    conn.commit()
-    conn.close()
-
-def get_mm_rank(vouch_count: int) -> str:
-    """Assigns ranks every 100 vouches."""
-    if vouch_count >= 500:
-        return "💎 **Prime MM**"
-    elif vouch_count >= 400:
-        return "👑 **Master MM**"
-    elif vouch_count >= 300:
-        return "🟣 **Elite MM**"
-    elif vouch_count >= 200:
-        return "🔵 **Senior MM**"
-    elif vouch_count >= 100:
-        return "🟢 **Junior MM**"
-    else:
-        return "⚪ **Unranked MM**"
-
-def render_stars(rating: int) -> str:
-    return "⭐" * rating + "⚪" * (5 - rating)
-
-# Default comment library for server auto-vouch
-DEFAULT_SERVER_COMMENTS = [
-    "Fast and reliable middleman service!", "Extremely safe trade, 10/10.",
-    "Smooth transaction, highly recommended!", "Very professional MM.",
-    "Best middleman server on Discord!", "Super quick response time.",
-    "Legit and trustworthy deals.", "Always feel safe trading here.",
-    "100% legit MM service.", "Quick and secure transaction.",
-    "Instant transfer, love this server!", "Handled large deal perfectly.",
-    "Friendly staff and fast MM.", "Zero hassle, great service.",
-    "Kept both parties safe!", "Top tier middleman execution.",
-    "Vouched! Seamless experience.", "Flawless service as always.",
-    "Fastest MM service out there.", "Appreciate the safety provided!",
-    "Super clean trade.", "Safe, trusted, and efficient.",
-    "Will definitely use this MM server again!", "Highly professional environment.",
-    "Trusted for big transactions.", "Quickest deal I have ever had.",
-    "Amazing middleman, made it easy.", "Great service, no complaints!",
-    "No doubts about safety here.", "Easiest trade ever thanks to this MM!"
-]
-
-active_tasks = {
-    "user_autovouch": {},
-    "server_autovouch": {}
-}
-
-# ------------------------------------------------------------------------------
-# 3. DISCORD BOT SETUP & EMBED BUILDERS
-# ------------------------------------------------------------------------------
 intents = discord.Intents.default()
+intents.message_content = True
 intents.members = True
 intents.guilds = True
-intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="$", intents=intents, help_command=None)
+DATA_FILE = "mm_data.json"
+
+# --- 50 RANKS ---
+RANKS = [
+    (0, "🥚 Beginner"), (5, "🌱 Newbie MM"), (10, "🛡️ Trusted"), (20, "⭐ Rising MM"),
+    (30, "🔥 Skilled MM"), (40, "💎 Elite MM"), (50, "👑 Pro MM"), (60, "⚡ Super MM"),
+    (75, "🌟 Legendary MM"), (90, "🚀 Godly MM"), (110, "💀 Mythic MM"), (130, "🎯 Master MM"),
+    (150, "🏆 Champion MM"), (175, "💫 Celestial MM"), (200, "🔱 Immortal MM"),
+    (225, "🌌 Void MM"), (250, "🐉 Dragon MM"), (275, "👁️ Abyss MM"), (300, "⚔️ Warlord MM"),
+    (325, "🧠 Sage MM"), (350, "🌀 Phantom MM"), (375, "🦁 Beast MM"), (400, "☠️ Reaper MM"),
+    (425, "🔮 Oracle MM"), (450, "🏅 Hall of Fame"), (475, "💈 Supreme MM"), (500, "👑 Emperor MM"),
+    (550, "🌠 Cosmic MM"), (600, "🗡️ Overlord MM"), (650, "🧬 Eternal MM"), (700, "🪐 Galaxy MM"),
+    (750, "🎖️ Titan MM"), (800, "🦾 Ultra MM"), (850, "🌋 Inferno MM"), (900, "❄️ Frost MM"),
+    (950, "⚡ Thunder MM"), (1000, "🌪️ Storm MM"), (1100, "🌊 Tsunami MM"), (1200, "🔥 Phoenix MM"),
+    (1300, "💀 Deathless MM"), (1400, "👑 King of MM"), (1500, "🌌 Universe MM"), (1600, "🧿 Divine MM"),
+    (1750, "♾️ Infinity MM"), (1900, "🕳️ Void King"), (2000, "🔱 The One"), (2250, "🏆 GOAT MM"),
+    (2500, "💎 Diamond GOAT"), (3000, "🌟 Star GOAT"), (4000, "🚀 Legend GOAT"), (5000, "👑 GOD OF MM")
+]
+
+def get_rank(c):
+    r = RANKS[0][1]
+    for req, name in RANKS:
+        if c >= req: r = name
+        else: break
+    return r
+
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {"users": {}, "server": 0, "config": {"autovouch_user": {}, "autoserver": {}}}
+    with open(DATA_FILE, 'r') as f: return json.load(f)
+
+def save_data(d):
+    with open(DATA_FILE, 'w') as f: json.dump(d, f, indent=4)
+
+def stars(r): return "⭐" * r + "☆" * (5-r) + f" ({r}/5)"
+
+def vouch_embed(target, total, rating, by=None, is_auto=False):
+    e = discord.Embed(color=discord.Color.gold() if rating >=4 else discord.Color.orange())
+    e.set_thumbnail(url=target.display_avatar.url)
+    e.title = f"{'🤖 AUTO' if is_auto else '✅'} VOUCH ADDED"
+    e.description = f"{target.mention} got **+1 Vouch!** Now has **{total}** vouches"
+    e.add_field(name="⭐ Rating", value=stars(rating), inline=True)
+    e.add_field(name="🏅 Rank", value=f"**{get_rank(total)}**", inline=True)
+    e.add_field(name="📊 Total", value=f"**{total}**", inline=True)
+    e.set_footer(text=f"Vouched by {by if by else 'Auto System'} • {datetime.now().strftime('%d/%m %I:%M %p')}")
+    return e
+
+# --- COMMANDS ---
+
+@bot.hybrid_command(name="vouch", description="Vouch a middleman with rating 1-5")
+async def vouch(ctx, member: discord.Member, rating: int, *, trade_details: str = "Legit MM"):
+    if not 1 <= rating <= 5: return await ctx.send("❌ Rating 1-5 only", ephemeral=True)
+    if member.id == ctx.author.id: return await ctx.send("❌ No self-vouch!", ephemeral=True)
+    data = load_data()
+    uid = str(member.id)
+    if uid not in data["users"]: data["users"][uid] = {"count":0, "ratings":[], "history":[]}
+    data["users"][uid]["count"] += 1
+    data["users"][uid]["ratings"].append(rating)
+    data["users"][uid]["history"].append({"by":ctx.author.id,"rating":rating,"details":trade_details,"time":str(datetime.now())})
+    save_data(data)
+    total = data["users"][uid]["count"]
+    avg = sum(data["users"][uid]["ratings"])/len(data["users"][uid]["ratings"])
+
+    embed = discord.Embed(title="✨ MIDDLEMAN VOUCH", color=discord.Color.green())
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="👤 Middleman", value=member.mention, inline=True)
+    embed.add_field(name="🙋 By", value=ctx.author.mention, inline=True)
+    embed.add_field(name="⭐ Rating", value=stars(rating), inline=False)
+    embed.add_field(name="📝 Trade", value=trade_details, inline=False)
+    embed.add_field(name="📈 Total", value=f"**{total}**", inline=True)
+    embed.add_field(name="🏅 Rank", value=get_rank(total), inline=True)
+    embed.add_field(name="💫 Avg", value=f"{avg:.1f}/5", inline=True)
+
+    await ctx.send(embed=embed)
+    await ctx.send(f"🎉 {member.mention} got **+1 Vouch!** Now has **{total}** vouches | {get_rank(total)} {stars(rating)}")
+
+@bot.hybrid_command(name="autovouch_user", description="Start auto user vouch")
+@commands.has_permissions(administrator=True)
+async def autovouch_user(ctx, voucher_role: discord.Role, target_role: discord.Role, delay_seconds: int = 60):
+    data = load_data()
+    data["config"]["autovouch_user"] = {"guild_id":ctx.guild.id,"channel_id":ctx.channel.id,"voucher_role_id":voucher_role.id,"target_role_id":target_role.id,"delay":delay_seconds,"active":True}
+    save_data(data)
+    if not auto_vouch_loop.is_running(): auto_vouch_loop.start()
+    else: auto_vouch_loop.change_interval(seconds=delay_seconds)
+    await ctx.send(embed=discord.Embed(title="🤖 Auto User Vouch ON", description=f"From: {voucher_role.mention} -> To: {target_role.mention}\nDelay: {delay_seconds}s\nRating: 3-5⭐ random\nType: No comments, only stars", color=discord.Color.blue()))
+
+@bot.hybrid_command(name="autoserver_vouch", description="Start auto server vouch")
+@commands.has_permissions(administrator=True)
+async def autoserver_vouch(ctx, delay_seconds: int = 120):
+    data = load_data()
+    data["config"]["autoserver"] = {"guild_id":ctx.guild.id,"channel_id":ctx.channel.id,"delay":delay_seconds,"active":True}
+    save_data(data)
+    if not auto_server_loop.is_running(): auto_server_loop.start()
+    else: auto_server_loop.change_interval(seconds=delay_seconds)
+    await ctx.send(embed=discord.Embed(title="🏢 Auto Server Vouch ON", description=f"Delay: {delay_seconds}s\nOnly Stars, No Comments", color=discord.Color.purple()))
+
+@bot.hybrid_command(name="stopautovouch", description="Stop all auto vouches")
+@commands.has_permissions(administrator=True)
+async def stopautovouch(ctx, type: str = "all"):
+    data = load_data()
+    stopped = []
+    if type.lower() in ["all", "user"]:
+        data["config"]["autovouch_user"] = {}
+        if auto_vouch_loop.is_running(): auto_vouch_loop.stop()
+        stopped.append("User AutoVouch")
+    if type.lower() in ["all", "server"]:
+        data["config"]["autoserver"] = {}
+        if auto_server_loop.is_running(): auto_server_loop.stop()
+        stopped.append("Server AutoVouch")
+    save_data(data)
+
+    if stopped:
+        await ctx.send(embed=discord.Embed(title="🛑 Auto Vouch Stopped", description=f"Stopped: {', '.join(stopped)}", color=discord.Color.red()))
+    else:
+        await ctx.send("Use: `$stopautovouch all` or `$stopautovouch user` or `$stopautovouch server`")
+
+@bot.hybrid_command(name="setvouch", description="Set vouch count")
+@commands.has_permissions(administrator=True)
+async def setvouch(ctx, target: str, member: discord.Member = None, amount: int = 0):
+    data = load_data()
+    if target.lower() == "user":
+        if not member: return await ctx.send("Usage: `$setvouch user @User 100`")
+        uid = str(member.id)
+        if uid not in data["users"]: data["users"][uid] = {"count":0,"ratings":[],"history":[]}
+        data["users"][uid]["count"] = amount
+        save_data(data)
+        await ctx.send(embed=discord.Embed(title="✅ Vouch Set", description=f"{member.mention} set to **{amount}**\nRank: **{get_rank(amount)}**", color=discord.Color.green()))
+    elif target.lower() == "server":
+        data["server"] = amount
+        save_data(data)
+        await ctx.send(embed=discord.Embed(title="✅ Server Vouch Set", description=f"Server set to **{amount}**", color=discord.Color.green()))
+    else:
+        await ctx.send("Use: `$setvouch user @User 100` or `$setvouch server 50`")
+
+@bot.hybrid_command(name="leaderboard", description="Top middlemans")
+async def leaderboard(ctx):
+    data = load_data()
+    if not data["users"]: return await ctx.send("No vouches yet!")
+    sorted_users = sorted(data["users"].items(), key=lambda x: x[1]["count"], reverse=True)[:15]
+    embed = discord.Embed(title="🏆 MIDDLEMAN LEADERBOARD", description=f"Server Vouches: **{data['server']}**", color=discord.Color.gold())
+    for i, (uid, info) in enumerate(sorted_users, 1):
+        try:
+            u = await bot.fetch_user(int(uid))
+            name = u.display_name
+        except: name = f"ID:{uid}"
+        avg = sum(info["ratings"])/len(info["ratings"]) if info["ratings"] else 0
+        embed.add_field(name=f"{i}. {name} - {get_rank(info['count'])}", value=f"Vouches: **{info['count']}** | Avg: {avg:.1f}⭐", inline=False)
+    embed.set_footer(text="50 Ranks System • Blox Fruits MM")
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="sync", description="Force sync slash commands")
+@commands.has_permissions(administrator=True)
+async def sync(ctx):
+    m = await ctx.send("🔄 Syncing...")
+    try:
+        synced1 = await bot.tree.sync()
+        synced2 = await bot.tree.sync(guild=ctx.guild)
+        await m.edit(content="", embed=discord.Embed(title="✅ SYNC DONE", description=f"Global: {len(synced1)} | Server: {len(synced2)}\nCommands: vouch, autovouch_user, autoserver_vouch, stopautovouch, setvouch, leaderboard, sync", color=discord.Color.green()))
+    except Exception as e:
+        await m.edit(content=f"❌ {e}")
+
+# --- LOOPS ---
+@tasks.loop(seconds=60)
+async def auto_vouch_loop():
+    data = load_data()
+    cfg = data["config"].get("autovouch_user")
+    if not cfg or not cfg.get("active"): return
+    guild = bot.get_guild(cfg["guild_id"])
+    channel = guild.get_channel(cfg["channel_id"]) if guild else None
+    if not guild or not channel: return
+    v_role = guild.get_role(cfg["voucher_role_id"])
+    t_role = guild.get_role(cfg["target_role_id"])
+    if not v_role or not t_role: return
+    v_members = [m for m in v_role.members if not m.bot]
+    t_members = [m for m in t_role.members if not m.bot]
+    if not v_members or not t_members: return
+    by = random.choice(v_members)
+    target = random.choice(t_members)
+    rating = random.randint(3,5)
+    uid = str(target.id)
+    if uid not in data["users"]: data["users"][uid] = {"count":0,"ratings":[],"history":[]}
+    data["users"][uid]["count"] += 1
+    data["users"][uid]["ratings"].append(rating)
+    save_data(data)
+    total = data["users"][uid]["count"]
+    await channel.send(f"🚀 {target.mention} got **+1 Vouch!** Now has **{total}** | {get_rank(total)}")
+    await channel.send(embed=vouch_embed(target, total, rating, by.display_name, True))
+
+@tasks.loop(seconds=120)
+async def auto_server_loop():
+    data = load_data()
+    cfg = data["config"].get("autoserver")
+    if not cfg or not cfg.get("active"): return
+    guild = bot.get_guild(cfg["guild_id"])
+    channel = guild.get_channel(cfg["channel_id"]) if guild else None
+    if not guild or not channel: return
+    rating = random.randint(4,5)
+    data["server"] += 1
+    save_data(data)
+    embed = discord.Embed(title="🏢 SERVER VOUCH", color=discord.Color.green())
+    embed.description = f"Server got **+1 Vouch!** Total: **{data['server']}**\n{stars(rating)}"
+    await channel.send(f"🌟 **Server +1 Vouch!** Now **{data['server']}** total {stars(rating)}")
+    await channel.send(embed=embed)
 
 @bot.event
 async def on_ready():
-    init_db()
-    print("Caching server member lists...")
-    for guild in bot.guilds:
-        try:
-            await guild.chunk()
-        except Exception as e:
-            print(f"Failed to chunk guild {guild.name}: {e}")
+    print(f"Logged in as {bot.user}")
+    try: await bot.tree.sync()
+    except: pass
+    data = load_data()
+    if data["config"].get("autovouch_user", {}).get("active"):
+        if not auto_vouch_loop.is_running():
+            auto_vouch_loop.change_interval(seconds=data["config"]["autovouch_user"].get("delay",60))
+            auto_vouch_loop.start()
+    if data["config"].get("autoserver", {}).get("active"):
+        if not auto_server_loop.is_running():
+            auto_server_loop.change_interval(seconds=data["config"]["autoserver"].get("delay",120))
+            auto_server_loop.start()
 
-    # --------------------------------------------------------------------------
-    # FORCE SYNC & MISMATCH CLEARING ROUTINE
-    # --------------------------------------------------------------------------
-    try:
-        guild_obj = discord.Object(id=GUILD_ID)
-
-        # 1. Clear any mismatched commands attached directly to the guild
-        bot.tree.clear_commands(guild=guild_obj)
-        await bot.tree.sync(guild=guild_obj)
-
-        # 2. Copy current global command signatures to guild tree
-        bot.tree.copy_global_to(guild=guild_obj)
-        
-        # 3. Force re-sync immediately
-        synced = await bot.tree.sync(guild=guild_obj)
-        print(f"⚡ INSTANT SYNC SUCCESSFUL: Registered {len(synced)} fresh command(s) to Guild ID {GUILD_ID}.")
-
-    except Exception as e:
-        print(f"❌ Command Sync Exception: {e}")
-
-    print(f"Logged in as {bot.user.name} ({bot.user.id})")
-
-def build_vouch_embed(
-    guild: discord.Guild, 
-    voucher: discord.Member, 
-    target: discord.Member, 
-    vouch_id: str, 
-    total_vouches: int,
-    rating: int,
-    comment: str = None,
-    is_server: bool = False
-) -> discord.Embed:
-    current_time_unix = int(time.time())
-    
-    embed = discord.Embed(
-        title="✅ VERIFIED VOUCH",
-        color=0x2B2D31
-    )
-
-    embed.add_field(name="👤 Voucher", value=voucher.mention, inline=True)
-
-    if is_server:
-        embed.add_field(name="🏢 Recipient", value=f"**{guild.name}**", inline=True)
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-    else:
-        mm_rank = get_mm_rank(total_vouches)
-        embed.add_field(name="🎯 Middleman", value=target.mention, inline=True)
-        embed.add_field(name="🎖️ MM Rank", value=mm_rank, inline=True)
-        if target.display_avatar:
-            embed.set_thumbnail(url=target.display_avatar.url)
-
-    embed.add_field(name="⭐ Rating", value=f"{render_stars(rating)} (`{rating}/5`)", inline=False)
-    
-    if comment:
-        embed.add_field(name="💬 Comment", value=f"*{comment}*", inline=False)
-
-    embed.add_field(name="📈 Total Deals Vouched", value=f"**{total_vouches}**", inline=True)
-    embed.add_field(name="⏰ Time", value=f"<t:{current_time_unix}:R>", inline=True)
-
-    footer_icon = guild.icon.url if guild.icon else None
-    embed.set_footer(text=f"{guild.name} • Vouch ID: {vouch_id}", icon_url=footer_icon)
-
-    return embed
-
-# ------------------------------------------------------------------------------
-# 4. BACKGROUND AUTO-VOUCH LOOPS
-# ------------------------------------------------------------------------------
-async def auto_vouch_user_loop(
-    channel: discord.TextChannel, 
-    voucher_role: discord.Role, 
-    target_role: discord.Role, 
-    min_delay_sec: int,
-    max_delay_sec: int
-):
-    guild = channel.guild
-    while True:
-        try:
-            delay = random.randint(min_delay_sec, max_delay_sec)
-            await asyncio.sleep(delay)
-
-            vouchers = [m for m in voucher_role.members if not m.bot]
-            recipients = [m for m in target_role.members if not m.bot]
-
-            if not vouchers or not recipients:
-                continue
-
-            voucher = random.choice(vouchers)
-            recipient = random.choice(recipients)
-            
-            if voucher.id == recipient.id and len(vouchers) > 1:
-                vouchers_filtered = [v for v in vouchers if v.id != recipient.id]
-                voucher = random.choice(vouchers_filtered)
-
-            rating = random.randint(3, 5)
-            v_id, total_vouches = add_vouch(guild.id, voucher.id, recipient.id, rating)
-
-            message_content = f"✅ 🎉 {recipient.mention} has received +1 vouch! **({total_vouches} Total Vouches)**"
-            
-            embed = build_vouch_embed(
-                guild, voucher, recipient, v_id, 
-                total_vouches=total_vouches, rating=rating, is_server=False
-            )
-            await channel.send(content=message_content, embed=embed)
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"Error in user auto-vouch loop ({guild.name}): {e}")
-
-async def auto_vouch_server_loop(
-    channel: discord.TextChannel, 
-    voucher_role: discord.Role, 
-    comments_list: list[str],
-    min_delay_sec: int,
-    max_delay_sec: int
-):
-    guild = channel.guild
-    while True:
-        try:
-            delay = random.randint(min_delay_sec, max_delay_sec)
-            await asyncio.sleep(delay)
-
-            vouchers = [m for m in voucher_role.members if not m.bot]
-            if not vouchers:
-                continue
-
-            voucher = random.choice(vouchers)
-            rating = random.randint(3, 5)
-            comment = random.choice(comments_list)
-
-            v_id, total_vouches = add_vouch(guild.id, voucher.id, 0, rating, comment)
-
-            message_content = f"✅ 🎉 **{guild.name}** has received +1 server vouch! **({total_vouches} Total Vouches)**"
-
-            embed = build_vouch_embed(
-                guild, voucher, None, v_id, 
-                total_vouches=total_vouches, rating=rating, comment=comment, is_server=True
-            )
-            await channel.send(content=message_content, embed=embed)
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"Error in server auto-vouch loop ({guild.name}): {e}")
-
-# ------------------------------------------------------------------------------
-# 5. SLASH COMMANDS
-# ------------------------------------------------------------------------------
-
-# 1. /vouch
-@bot.tree.command(name="vouch", description="Submit a manual vouch for a middleman.")
-@app_commands.describe(
-    middleman="The middleman you are vouching for",
-    rating="Star rating from 1 to 5",
-    comment="Optional review feedback"
-)
-@app_commands.choices(rating=[
-    app_commands.Choice(name="⭐ 1 Star", value=1),
-    app_commands.Choice(name="⭐⭐ 2 Stars", value=2),
-    app_commands.Choice(name="⭐⭐⭐ 3 Stars", value=3),
-    app_commands.Choice(name="⭐⭐⭐⭐ 4 Stars", value=4),
-    app_commands.Choice(name="⭐⭐⭐⭐⭐ 5 Stars", value=5),
-])
-async def vouch(interaction: discord.Interaction, middleman: discord.Member, rating: int, comment: str = None):
-    if middleman.id == interaction.user.id:
-        await interaction.response.send_message("❌ You cannot vouch for yourself!", ephemeral=True)
-        return
-
-    v_id, total_vouches = add_vouch(interaction.guild.id, interaction.user.id, middleman.id, rating, comment)
-
-    message_content = f"🎉 {middleman.mention} has received +1 vouch! **({total_vouches} Total Vouches)**"
-
-    embed = build_vouch_embed(
-        interaction.guild, interaction.user, middleman, v_id, 
-        total_vouches=total_vouches, rating=rating, comment=comment, is_server=False
-    )
-    await interaction.response.send_message(content=message_content, embed=embed)
-
-# 2. /autovouch_users
-@bot.tree.command(name="autovouch_users", description="Start automated user vouching loop.")
-@app_commands.describe(
-    voucher_role="Role providing vouches",
-    middleman_role="Role receiving vouches",
-    min_delay_seconds="Minimum delay in seconds (Default: 300)",
-    max_delay_seconds="Maximum delay in seconds (Default: 420)"
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def autovouch_users(
-    interaction: discord.Interaction, 
-    voucher_role: discord.Role, 
-    middleman_role: discord.Role, 
-    min_delay_seconds: int = 300,
-    max_delay_seconds: int = 420
-):
-    guild_id = interaction.guild.id
-    if guild_id in active_tasks["user_autovouch"]:
-        await interaction.response.send_message("⚠️ Auto-vouch loop is already active! Stop it first.", ephemeral=True)
-        return
-
-    task = asyncio.create_task(
-        auto_vouch_user_loop(
-            interaction.channel, voucher_role, middleman_role, 
-            min_delay_seconds, max_delay_seconds
-        )
-    )
-    active_tasks["user_autovouch"][guild_id] = task
-
-    embed = discord.Embed(
-        title="🚀 User Auto-Vouch Active",
-        description=(
-            f"Active in {interaction.channel.mention}.\n\n"
-            f"• **Delay:** `{min_delay_seconds}`s - `{max_delay_seconds}`s\n"
-            f"• **Vouchers:** {voucher_role.mention}\n"
-            f"• **Middlemen:** {middleman_role.mention}"
-        ),
-        color=0x57F287
-    )
-    await interaction.response.send_message(embed=embed)
-
-# 3. /server_vouch
-@bot.tree.command(name="server_vouch", description="Start automated server vouching loop.")
-@app_commands.describe(
-    voucher_role="Role providing vouches for the server",
-    custom_comments="Comma-separated custom comments (Leave empty for default library)",
-    min_delay_seconds="Minimum delay in seconds (Default: 300)",
-    max_delay_seconds="Maximum delay in seconds (Default: 420)"
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def server_vouch(
-    interaction: discord.Interaction, 
-    voucher_role: discord.Role, 
-    custom_comments: str = None,
-    min_delay_seconds: int = 300,
-    max_delay_seconds: int = 420
-):
-    guild_id = interaction.guild.id
-    if guild_id in active_tasks["server_autovouch"]:
-        await interaction.response.send_message("⚠️ Server Auto-Vouch is already active!", ephemeral=True)
-        return
-
-    comments_list = [c.strip() for c in custom_comments.split(",")] if custom_comments else DEFAULT_SERVER_COMMENTS
-
-    task = asyncio.create_task(
-        auto_vouch_server_loop(
-            interaction.channel, voucher_role, comments_list,
-            min_delay_seconds, max_delay_seconds
-        )
-    )
-    active_tasks["server_autovouch"][guild_id] = task
-
-    embed = discord.Embed(
-        title="🚀 Server Auto-Vouch Active",
-        description=(
-            f"Active in {interaction.channel.mention}.\n\n"
-            f"• **Vouchers:** {voucher_role.mention}\n"
-            f"• **Comments Available:** `{len(comments_list)}`"
-        ),
-        color=0x57F287
-    )
-    await interaction.response.send_message(embed=embed)
-
-# 4. /setvouch
-@bot.tree.command(name="setvouch", description="Set total vouches count for a middleman or server.")
-@app_commands.describe(user="Middleman to modify (Leave empty for server profile)", count="New total vouches")
-@app_commands.checks.has_permissions(administrator=True)
-async def setvouch(interaction: discord.Interaction, count: int, user: discord.Member = None):
-    target_id = user.id if user else 0
-    set_vouch_count(interaction.guild.id, target_id, count)
-    
-    target_name = user.mention if user else f"**{interaction.guild.name}**"
-    await interaction.response.send_message(f"⚙️ Successfully set {target_name}'s total vouches to **{count}**.")
-
-# 5. /removevouch
-@bot.tree.command(name="removevouch", description="Remove a specific number of vouches from a user or server.")
-@app_commands.describe(user="Middleman to modify (Leave empty for server profile)", count="Vouches to subtract")
-@app_commands.checks.has_permissions(administrator=True)
-async def removevouch(interaction: discord.Interaction, count: int, user: discord.Member = None):
-    target_id = user.id if user else 0
-    current = get_vouch_count(interaction.guild.id, target_id)
-    new_count = max(0, current - count)
-    
-    set_vouch_count(interaction.guild.id, target_id, new_count)
-    target_name = user.mention if user else f"**{interaction.guild.name}**"
-    await interaction.response.send_message(f"🗑️ Subtracted **{count}** vouches from {target_name}. New Total: **{new_count}**.")
-
-# 6. /profile
-@bot.tree.command(name="profile", description="Check middleman or server vouch metrics.")
-@app_commands.describe(user="User profile (Leave empty for server profile)")
-async def profile(interaction: discord.Interaction, user: discord.Member = None):
-    guild = interaction.guild
-    target_id = user.id if user else 0
-    total = get_vouch_count(guild.id, target_id)
-
-    embed = discord.Embed(color=0x2B2D31)
-
-    if user:
-        embed.title = f"👤 Middleman Profile: {user.display_name}"
-        embed.add_field(name="🎯 Middleman", value=user.mention, inline=True)
-        embed.add_field(name="📈 Total Deals Vouched", value=f"**{total}**", inline=True)
-        embed.add_field(name="🎖️ MM Rank", value=get_mm_rank(total), inline=False)
-        if user.display_avatar:
-            embed.set_thumbnail(url=user.display_avatar.url)
-    else:
-        embed.title = f"🏢 Server Profile: {guild.name}"
-        embed.add_field(name="🏢 Server", value=guild.name, inline=True)
-        embed.add_field(name="📈 Total Server Vouches", value=f"**{total}**", inline=True)
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-
-    embed.set_footer(text=f"Server: {guild.name}")
-    await interaction.response.send_message(embed=embed)
-
-# 7. /stop_autovouch
-@bot.tree.command(name="stop_autovouch", description="Stop user or server auto-vouching loops.")
-@app_commands.describe(type="Select which loop to terminate")
-@app_commands.choices(type=[
-    app_commands.Choice(name="User Auto-Vouch", value="user"),
-    app_commands.Choice(name="Server Auto-Vouch", value="server"),
-])
-@app_commands.checks.has_permissions(administrator=True)
-async def stop_autovouch(interaction: discord.Interaction, type: str):
-    guild_id = interaction.guild.id
-    target_dict = active_tasks["user_autovouch"] if type == "user" else active_tasks["server_autovouch"]
-
-    if guild_id in target_dict:
-        target_dict[guild_id].cancel()
-        del target_dict[guild_id]
-        await interaction.response.send_message(f"🛑 Terminated {type} auto-vouch service.")
-    else:
-        await interaction.response.send_message(f"⚠️ No active {type} auto-vouch process running.", ephemeral=True)
-
-# 8. Prefix Admin Sync (!sync)
-@bot.command(name="sync")
-@commands.has_permissions(administrator=True)
-async def sync_prefix(ctx: commands.Context):
-    """Fallback manual sync if Discord cache hangs."""
-    try:
-        guild_obj = discord.Object(id=GUILD_ID)
-        bot.tree.clear_commands(guild=guild_obj)
-        bot.tree.copy_global_to(guild=guild_obj)
-        synced = await bot.tree.sync(guild=guild_obj)
-        await ctx.send(f"✅ Forced Manual Sync Complete! Re-registered **{len(synced)}** command(s).")
-    except Exception as e:
-        await ctx.send(f"❌ Manual Sync Failed: `{e}`")
-
-# ------------------------------------------------------------------------------
-# 6. RUN PROCESS
-# ------------------------------------------------------------------------------
-if __name__ == "__main__":
-    # Start Keep-Alive Server in a daemon thread
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-
-    # Launch Discord Bot
-    token = os.getenv("DISCORD_TOKEN")
-    if not token:
-        print("❌ CRITICAL ERROR: 'DISCORD_TOKEN' environment variable is missing!")
-    else:
-        bot.run(token)
+bot.run(os.getenv("DISCORD_TOKEN"))
