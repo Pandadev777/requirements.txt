@@ -34,9 +34,6 @@ def keep_alive():
 TOKEN = os.environ.get("DISCORD_TOKEN")
 
 CONFIG = {
-    "MIN_DELAY": 90,        # 90 seconds
-    "MAX_DELAY": 150,       # 150 seconds
-    "MAX_VOUCHES_PER_HOUR": 25,
     "COOLDOWN_HOURS": 24
 }
 
@@ -271,22 +268,33 @@ async def auto_vouch_loop(guild_id):
             guild = bot.get_guild(int(guild_id))
             if guild:
                 channel = guild.get_channel(int(config["channel_id"]))
-                fixed_ids = [str(x) for x in config.get("fixed_users", [])]
-                
-                members = [m for m in guild.members if not m.bot and str(m.id) not in fixed_ids]
-                target_members = [m for m in guild.members if str(m.id) in fixed_ids]
+                voucher_role = guild.get_role(int(config["voucher_role_id"]))
+                target_role = guild.get_role(int(config["target_role_id"]))
 
-                if members and target_members and channel:
-                    from_user = random.choice(members)
-                    to_user = random.choice(target_members)
-                    rating = random.randint(4, 5)
+                if channel and voucher_role and target_role:
+                    vouchers = [m for m in voucher_role.members if not m.bot]
+                    targets = [m for m in target_role.members if not m.bot]
 
-                    await send_user_vouch(guild, channel, from_user, to_user, rating, is_auto=True)
+                    if vouchers and targets:
+                        from_user = random.choice(vouchers)
+                        to_user = random.choice(targets)
+
+                        # Prevent self-vouching if user holds both roles
+                        if from_user.id == to_user.id and len(vouchers) > 1:
+                            vouchers_filtered = [m for m in vouchers if m.id != to_user.id]
+                            from_user = random.choice(vouchers_filtered)
+
+                        if from_user.id != to_user.id:
+                            rating = random.randint(4, 5)
+                            await send_user_vouch(guild, channel, from_user, to_user, rating, is_auto=True)
+
+            min_d = config.get("min_delay", 90)
+            max_d = config.get("max_delay", 150)
+            await asyncio.sleep(random.randint(min_d, max_d))
 
         except Exception as e:
             print(f"Auto Vouch Error [{guild_id}]: {e}")
-
-        await asyncio.sleep(random.randint(CONFIG["MIN_DELAY"], CONFIG["MAX_DELAY"]))
+            await asyncio.sleep(60)
 
 async def server_vouch_loop(guild_id):
     files = get_files(guild_id)
@@ -308,10 +316,13 @@ async def server_vouch_loop(guild_id):
                         comment = random.choice(SERVER_COMMENTS)
                         await send_server_vouch(guild, channel, from_user, 5, comment)
 
+            min_d = config.get("min_delay", 90)
+            max_d = config.get("max_delay", 150)
+            await asyncio.sleep(random.randint(min_d, max_d))
+
         except Exception as e:
             print(f"Server Vouch Error [{guild_id}]: {e}")
-
-        await asyncio.sleep(random.randint(CONFIG["MIN_DELAY"], CONFIG["MAX_DELAY"]))
+            await asyncio.sleep(60)
 
 # ==========================================
 # 4. DISCORD SLASH COMMANDS
@@ -354,6 +365,120 @@ async def vouch(interaction: discord.Interaction, user: discord.Member, rating: 
     await send_user_vouch(interaction.guild, channel, interaction.user, user, rating.value, proof)
     await interaction.followup.send(f"✅ Vouch posted in {channel.mention}")
 
+@bot.tree.command(name="autovouch", description="Start automated user vouches using voucher and target roles")
+@app_commands.describe(
+    voucher_role="Role for members who GIVE the vouch",
+    target_role="Role for members who RECEIVE the vouch (e.g. Middleman)",
+    channel="Channel to post embeds",
+    min_delay="Minimum time delay in seconds (Default: 90)",
+    max_delay="Maximum time delay in seconds (Default: 150)"
+)
+async def autovouch(
+    interaction: discord.Interaction, 
+    voucher_role: discord.Role, 
+    target_role: discord.Role, 
+    channel: discord.TextChannel,
+    min_delay: int = 90,
+    max_delay: int = 150
+):
+    await interaction.response.defer(ephemeral=True)
+
+    if min_delay <= 0 or max_delay <= 0 or min_delay > max_delay:
+        return await interaction.followup.send("❌ Invalid delay times. Ensure `min_delay` is greater than 0 and less than or equal to `max_delay`.")
+
+    files = get_files(interaction.guild.id)
+    cfg = {
+        "enabled": True, 
+        "voucher_role_id": str(voucher_role.id), 
+        "target_role_id": str(target_role.id), 
+        "channel_id": str(channel.id),
+        "min_delay": min_delay,
+        "max_delay": max_delay
+    }
+    save_json(files["config"], cfg)
+
+    gid = str(interaction.guild.id)
+    if gid in auto_vouch_tasks:
+        auto_vouch_tasks[gid].cancel()
+    auto_vouch_tasks[gid] = bot.loop.create_task(auto_vouch_loop(gid))
+
+    await interaction.followup.send(
+        f"✅ **Auto Vouch Enabled!**\n"
+        f"• **Voucher Role:** {voucher_role.mention}\n"
+        f"• **Target Role:** {target_role.mention}\n"
+        f"• **Channel:** {channel.mention}\n"
+        f"• **Delay Range:** {min_delay}s to {max_delay}s"
+    )
+
+@bot.tree.command(name="stopautovouch", description="Stop user auto vouch")
+async def stopautovouch(interaction: discord.Interaction):
+    gid = str(interaction.guild.id)
+    files = get_files(interaction.guild.id)
+    cfg = load_json(files["config"], {})
+    cfg["enabled"] = False
+    save_json(files["config"], cfg)
+    
+    if gid in auto_vouch_tasks:
+        auto_vouch_tasks[gid].cancel()
+        del auto_vouch_tasks[gid]
+
+    await interaction.response.send_message("🛑 User Auto Vouch stopped.", ephemeral=True)
+
+@bot.tree.command(name="servervouch", description="Start automated server vouches with custom delay")
+@app_commands.describe(
+    role="Role of members to give server reviews",
+    channel="Channel to post embeds",
+    min_delay="Minimum time delay in seconds (Default: 90)",
+    max_delay="Maximum time delay in seconds (Default: 150)"
+)
+async def servervouch(
+    interaction: discord.Interaction, 
+    role: discord.Role, 
+    channel: discord.TextChannel,
+    min_delay: int = 90,
+    max_delay: int = 150
+):
+    await interaction.response.defer(ephemeral=True)
+
+    if min_delay <= 0 or max_delay <= 0 or min_delay > max_delay:
+        return await interaction.followup.send("❌ Invalid delay times. Ensure `min_delay` is greater than 0 and less than or equal to `max_delay`.")
+
+    files = get_files(interaction.guild.id)
+    cfg = {
+        "enabled": True, 
+        "role_id": str(role.id), 
+        "channel_id": str(channel.id),
+        "min_delay": min_delay,
+        "max_delay": max_delay
+    }
+    save_json(files["server_config"], cfg)
+
+    gid = str(interaction.guild.id)
+    if gid in server_vouch_tasks:
+        server_vouch_tasks[gid].cancel()
+    server_vouch_tasks[gid] = bot.loop.create_task(server_vouch_loop(gid))
+
+    await interaction.followup.send(
+        f"✅ **Server Vouch Enabled!**\n"
+        f"• **Reviewer Role:** {role.mention}\n"
+        f"• **Channel:** {channel.mention}\n"
+        f"• **Delay Range:** {min_delay}s to {max_delay}s"
+    )
+
+@bot.tree.command(name="stopservervouch", description="Stop server vouch")
+async def stopservervouch(interaction: discord.Interaction):
+    gid = str(interaction.guild.id)
+    files = get_files(interaction.guild.id)
+    cfg = load_json(files["server_config"], {})
+    cfg["enabled"] = False
+    save_json(files["server_config"], cfg)
+
+    if gid in server_vouch_tasks:
+        server_vouch_tasks[gid].cancel()
+        del server_vouch_tasks[gid]
+
+    await interaction.response.send_message("🛑 Server Vouch stopped.", ephemeral=True)
+
 @bot.tree.command(name="setvouch", description="Modify user vouches (Admin Only)")
 @app_commands.choices(action=[
     app_commands.Choice(name="Set Exact Value", value="set"),
@@ -380,66 +505,6 @@ async def setvouch(interaction: discord.Interaction, user: discord.Member, actio
     new_total = get_vouch_count(interaction.guild.id, user.id)
     new_rank = get_mm_rank(new_total)
     await interaction.response.send_message(f"✅ Updated **{user.display_name}** total vouches to **{new_total}** (Rank: **{new_rank}**)", ephemeral=True)
-
-@bot.tree.command(name="autovouch", description="Start automated user vouches")
-async def autovouch(interaction: discord.Interaction, fixedusers: str, channel: discord.TextChannel):
-    await interaction.response.defer(ephemeral=True)
-    
-    names = [n.strip().lower() for n in fixedusers.split(",")]
-    matched_ids = [str(m.id) for m in interaction.guild.members if m.display_name.lower() in names or m.name.lower() in names]
-
-    if not matched_ids:
-        return await interaction.followup.send("❌ Could not find specified users in this server.")
-
-    files = get_files(interaction.guild.id)
-    cfg = {"enabled": True, "fixed_users": matched_ids, "channel_id": str(channel.id)}
-    save_json(files["config"], cfg)
-
-    gid = str(interaction.guild.id)
-    if gid in auto_vouch_tasks:
-        auto_vouch_tasks[gid].cancel()
-    auto_vouch_tasks[gid] = bot.loop.create_task(auto_vouch_loop(gid))
-
-    await interaction.followup.send(f"✅ User Auto Vouch initialized in {channel.mention}")
-
-@bot.tree.command(name="stopautovouch", description="Stop user auto vouch")
-async def stopautovouch(interaction: discord.Interaction):
-    gid = str(interaction.guild.id)
-    files = get_files(interaction.guild.id)
-    save_json(files["config"], {"enabled": False})
-    
-    if gid in auto_vouch_tasks:
-        auto_vouch_tasks[gid].cancel()
-        del auto_vouch_tasks[gid]
-
-    await interaction.response.send_message("🛑 User Auto Vouch stopped.", ephemeral=True)
-
-@bot.tree.command(name="servervouch", description="Start automated server vouches using a specific role")
-async def servervouch(interaction: discord.Interaction, role: discord.Role, channel: discord.TextChannel):
-    await interaction.response.defer(ephemeral=True)
-
-    files = get_files(interaction.guild.id)
-    cfg = {"enabled": True, "role_id": str(role.id), "channel_id": str(channel.id)}
-    save_json(files["server_config"], cfg)
-
-    gid = str(interaction.guild.id)
-    if gid in server_vouch_tasks:
-        server_vouch_tasks[gid].cancel()
-    server_vouch_tasks[gid] = bot.loop.create_task(server_vouch_loop(gid))
-
-    await interaction.followup.send(f"✅ Server Vouch initialized in {channel.mention} for members with **@{role.name}**.")
-
-@bot.tree.command(name="stopservervouch", description="Stop server vouch")
-async def stopservervouch(interaction: discord.Interaction):
-    gid = str(interaction.guild.id)
-    files = get_files(interaction.guild.id)
-    save_json(files["server_config"], {"enabled": False})
-
-    if gid in server_vouch_tasks:
-        server_vouch_tasks[gid].cancel()
-        del server_vouch_tasks[gid]
-
-    await interaction.response.send_message("🛑 Server Vouch stopped.", ephemeral=True)
 
 @bot.tree.command(name="vouches", description="Check user vouches and current Middleman Rank")
 async def vouches(interaction: discord.Interaction, user: discord.Member):
