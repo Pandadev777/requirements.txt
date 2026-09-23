@@ -208,7 +208,7 @@ async def send_user_vouch(guild, channel, from_user, to_user, rating, proof=None
             embed.add_field(name="🔗 Proof", value=f"[Click Here]({proof})", inline=False)
 
     # Top message pinging the user and displaying updated vouch count
-    top_message = f"{to_user.mention} got +1 vouch, now has {new_vouch_count} vouches!"
+    top_message = f"🎉 {to_user.mention} GOT +1 VOUCH , NOW HAS {new_vouch_count} VOUCHES!"
 
     await send_webhook_vouch(guild, channel, embed, content=top_message)
 
