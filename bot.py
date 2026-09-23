@@ -279,7 +279,6 @@ async def auto_vouch_loop(guild_id):
                         from_user = random.choice(vouchers)
                         to_user = random.choice(targets)
 
-                        # Prevent self-vouching if user holds both roles
                         if from_user.id == to_user.id and len(vouchers) > 1:
                             vouchers_filtered = [m for m in vouchers if m.id != to_user.id]
                             from_user = random.choice(vouchers_filtered)
@@ -325,7 +324,7 @@ async def server_vouch_loop(guild_id):
             await asyncio.sleep(60)
 
 # ==========================================
-# 4. DISCORD SLASH COMMANDS
+# 4. DISCORD SLASH COMMANDS (WITH DEFER FIXES)
 # ==========================================
 @bot.event
 async def on_ready():
@@ -412,6 +411,8 @@ async def autovouch(
 
 @bot.tree.command(name="stopautovouch", description="Stop user auto vouch")
 async def stopautovouch(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
     gid = str(interaction.guild.id)
     files = get_files(interaction.guild.id)
     cfg = load_json(files["config"], {})
@@ -422,7 +423,7 @@ async def stopautovouch(interaction: discord.Interaction):
         auto_vouch_tasks[gid].cancel()
         del auto_vouch_tasks[gid]
 
-    await interaction.response.send_message("🛑 User Auto Vouch stopped.", ephemeral=True)
+    await interaction.followup.send("🛑 User Auto Vouch stopped.")
 
 @bot.tree.command(name="servervouch", description="Start automated server vouches with custom delay")
 @app_commands.describe(
@@ -467,6 +468,8 @@ async def servervouch(
 
 @bot.tree.command(name="stopservervouch", description="Stop server vouch")
 async def stopservervouch(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
     gid = str(interaction.guild.id)
     files = get_files(interaction.guild.id)
     cfg = load_json(files["server_config"], {})
@@ -477,7 +480,7 @@ async def stopservervouch(interaction: discord.Interaction):
         server_vouch_tasks[gid].cancel()
         del server_vouch_tasks[gid]
 
-    await interaction.response.send_message("🛑 Server Vouch stopped.", ephemeral=True)
+    await interaction.followup.send("🛑 Server Vouch stopped.")
 
 @bot.tree.command(name="setvouch", description="Modify user vouches (Admin Only)")
 @app_commands.choices(action=[
@@ -486,8 +489,10 @@ async def stopservervouch(interaction: discord.Interaction):
     app_commands.Choice(name="Remove Vouches", value="remove")
 ])
 async def setvouch(interaction: discord.Interaction, user: discord.Member, action: app_commands.Choice[str], amount: int):
+    await interaction.response.defer(ephemeral=True)
+
     if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message("❌ Admin permissions required.", ephemeral=True)
+        return await interaction.followup.send("❌ Admin permissions required.")
 
     files = get_files(interaction.guild.id)
     manual = load_json(files["manual_counts"], {})
@@ -504,16 +509,20 @@ async def setvouch(interaction: discord.Interaction, user: discord.Member, actio
     save_json(files["manual_counts"], manual)
     new_total = get_vouch_count(interaction.guild.id, user.id)
     new_rank = get_mm_rank(new_total)
-    await interaction.response.send_message(f"✅ Updated **{user.display_name}** total vouches to **{new_total}** (Rank: **{new_rank}**)", ephemeral=True)
+    await interaction.followup.send(f"✅ Updated **{user.display_name}** total vouches to **{new_total}** (Rank: **{new_rank}**)")
 
 @bot.tree.command(name="vouches", description="Check user vouches and current Middleman Rank")
 async def vouches(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+
     count = get_vouch_count(interaction.guild.id, user.id)
     rank = get_mm_rank(count)
-    await interaction.response.send_message(f"📊 **{user.display_name}** has **{count}** total vouches.\n🏆 **Middleman Rank:** {rank}", ephemeral=True)
+    await interaction.followup.send(f"📊 **{user.display_name}** has **{count}** total vouches.\n🏆 **Middleman Rank:** {rank}")
 
 @bot.tree.command(name="leaderboard", description="Top 10 vouched users")
 async def leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+
     counts = {}
     for m in interaction.guild.members:
         cnt = get_vouch_count(interaction.guild.id, m.id)
@@ -524,7 +533,7 @@ async def leaderboard(interaction: discord.Interaction):
     description = "\n".join([f"**#{i+1}** <@{user_id}> - **{cnt}** vouches (🏆 {get_mm_rank(cnt)})" for i, (user_id, cnt) in enumerate(sorted_list)]) or "No vouches recorded."
 
     embed = discord.Embed(title=f"🏆 {interaction.guild.name} Middleman Leaderboard", description=description, color=discord.Color.gold())
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 # ==========================================
 # 5. ENTRY POINT
