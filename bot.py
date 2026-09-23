@@ -163,7 +163,7 @@ async def in_cooldown(guild_id, from_id, to_id):
     return False
 
 # Webhook Handler
-async def send_webhook_vouch(guild, channel, embed):
+async def send_webhook_vouch(guild, channel, embed, content=None):
     files = get_files(guild.id)
     webhooks = load_json(files["webhooks"], {})
     
@@ -179,7 +179,7 @@ async def send_webhook_vouch(guild, channel, embed):
         webhooks[str(channel.id)] = {"id": webhook.id, "token": webhook.token}
         save_json(files["webhooks"], webhooks)
 
-    await webhook.send(embed=embed, username=f"{guild.name} Vouch System")
+    await webhook.send(content=content, embed=embed, username=f"{guild.name} Vouch System")
 
 # Vouch Messaging Actions
 async def send_user_vouch(guild, channel, from_user, to_user, rating, proof=None, is_auto=False):
@@ -207,7 +207,10 @@ async def send_user_vouch(guild, channel, from_user, to_user, rating, proof=None
         else:
             embed.add_field(name="🔗 Proof", value=f"[Click Here]({proof})", inline=False)
 
-    await send_webhook_vouch(guild, channel, embed)
+    # Top message pinging the user and displaying updated vouch count
+    top_message = f"{to_user.mention} got +1 vouch, now has {new_vouch_count} vouches!"
+
+    await send_webhook_vouch(guild, channel, embed, content=top_message)
 
     vouches = load_json(files["user_vouches"], [])
     vouches.append({
@@ -324,7 +327,7 @@ async def server_vouch_loop(guild_id):
             await asyncio.sleep(60)
 
 # ==========================================
-# 4. DISCORD SLASH COMMANDS (WITH DEFER FIXES)
+# 4. DISCORD SLASH COMMANDS
 # ==========================================
 @bot.event
 async def on_ready():
@@ -355,14 +358,24 @@ async def on_ready():
     app_commands.Choice(name="4 ⭐⭐⭐⭐", value=4),
     app_commands.Choice(name="5 ⭐⭐⭐⭐⭐", value=5),
 ])
-async def vouch(interaction: discord.Interaction, user: discord.Member, rating: app_commands.Choice[int], channel: discord.TextChannel, proof: str = None):
+async def vouch(
+    interaction: discord.Interaction, 
+    user: discord.Member, 
+    rating: app_commands.Choice[int], 
+    channel: discord.abc.GuildChannel, 
+    proof: str = None
+):
     await interaction.response.defer(ephemeral=True)
-    
+
+    target_channel = interaction.guild.get_channel(channel.id)
+    if not isinstance(target_channel, discord.TextChannel):
+        return await interaction.followup.send("❌ Please select a valid Text Channel.")
+
     if await in_cooldown(interaction.guild.id, interaction.user.id, user.id):
         return await interaction.followup.send("❌ You are on a 24-hour cooldown for vouching this user.")
 
-    await send_user_vouch(interaction.guild, channel, interaction.user, user, rating.value, proof)
-    await interaction.followup.send(f"✅ Vouch posted in {channel.mention}")
+    await send_user_vouch(interaction.guild, target_channel, interaction.user, user, rating.value, proof)
+    await interaction.followup.send(f"✅ Vouch posted in {target_channel.mention}")
 
 @bot.tree.command(name="autovouch", description="Start automated user vouches using voucher and target roles")
 @app_commands.describe(
@@ -376,11 +389,15 @@ async def autovouch(
     interaction: discord.Interaction, 
     voucher_role: discord.Role, 
     target_role: discord.Role, 
-    channel: discord.TextChannel,
+    channel: discord.abc.GuildChannel,
     min_delay: int = 90,
     max_delay: int = 150
 ):
     await interaction.response.defer(ephemeral=True)
+
+    target_channel = interaction.guild.get_channel(channel.id)
+    if not isinstance(target_channel, discord.TextChannel):
+        return await interaction.followup.send("❌ Please select a valid Text Channel.")
 
     if min_delay <= 0 or max_delay <= 0 or min_delay > max_delay:
         return await interaction.followup.send("❌ Invalid delay times. Ensure `min_delay` is greater than 0 and less than or equal to `max_delay`.")
@@ -390,7 +407,7 @@ async def autovouch(
         "enabled": True, 
         "voucher_role_id": str(voucher_role.id), 
         "target_role_id": str(target_role.id), 
-        "channel_id": str(channel.id),
+        "channel_id": str(target_channel.id),
         "min_delay": min_delay,
         "max_delay": max_delay
     }
@@ -405,7 +422,7 @@ async def autovouch(
         f"✅ **Auto Vouch Enabled!**\n"
         f"• **Voucher Role:** {voucher_role.mention}\n"
         f"• **Target Role:** {target_role.mention}\n"
-        f"• **Channel:** {channel.mention}\n"
+        f"• **Channel:** {target_channel.mention}\n"
         f"• **Delay Range:** {min_delay}s to {max_delay}s"
     )
 
@@ -435,11 +452,15 @@ async def stopautovouch(interaction: discord.Interaction):
 async def servervouch(
     interaction: discord.Interaction, 
     role: discord.Role, 
-    channel: discord.TextChannel,
+    channel: discord.abc.GuildChannel,
     min_delay: int = 90,
     max_delay: int = 150
 ):
     await interaction.response.defer(ephemeral=True)
+
+    target_channel = interaction.guild.get_channel(channel.id)
+    if not isinstance(target_channel, discord.TextChannel):
+        return await interaction.followup.send("❌ Please select a valid Text Channel.")
 
     if min_delay <= 0 or max_delay <= 0 or min_delay > max_delay:
         return await interaction.followup.send("❌ Invalid delay times. Ensure `min_delay` is greater than 0 and less than or equal to `max_delay`.")
@@ -448,7 +469,7 @@ async def servervouch(
     cfg = {
         "enabled": True, 
         "role_id": str(role.id), 
-        "channel_id": str(channel.id),
+        "channel_id": str(target_channel.id),
         "min_delay": min_delay,
         "max_delay": max_delay
     }
@@ -462,7 +483,7 @@ async def servervouch(
     await interaction.followup.send(
         f"✅ **Server Vouch Enabled!**\n"
         f"• **Reviewer Role:** {role.mention}\n"
-        f"• **Channel:** {channel.mention}\n"
+        f"• **Channel:** {target_channel.mention}\n"
         f"• **Delay Range:** {min_delay}s to {max_delay}s"
     )
 
